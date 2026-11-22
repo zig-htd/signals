@@ -1,7 +1,7 @@
 .{
-    .name = .zig_signals,
+    .name = .signals,
     .version = "0.0.0",
-    .fingerprint = 0xa53d8355cdb5a523,
+    .fingerprint = 0xd6adc50d64306711,
     .minimum_zig_version = "0.17.0",
     .dependencies = .{},
     .paths = .{

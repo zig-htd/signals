@@ -1,5 +1,5 @@
 const std = @import("std");
-const signals = @import("zig_signals");
+const signals = @import("signals");
 
 pub fn main() !void {
     try signals.init(&.{ .INT, .TERM });
