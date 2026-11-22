@@ -206,3 +206,29 @@ test "wait returns raised signal" {
     const sig = try waitTimeout(1000);
     try std.testing.expectEqual(posix.SIG.USR1, sig.?);
 }
+
+var restored_handler_calls: u32 = 0;
+
+fn restoredSignalHandler(_: posix.SIG) callconv(.c) void {
+    restored_handler_calls += 1;
+}
+
+test "deinit restores the previous signal handler" {
+    var previous_action: posix.Sigaction = undefined;
+    const test_action: posix.Sigaction = .{
+        .handler = .{ .handler = restoredSignalHandler },
+        .mask = posix.sigemptyset(),
+        .flags = 0,
+    };
+    posix.sigaction(.USR1, &test_action, &previous_action);
+    defer posix.sigaction(.USR1, &previous_action, null);
+
+    restored_handler_calls = 0;
+    try init(&.{.USR1});
+    defer deinit();
+
+    deinit();
+    try posix.raise(.USR1);
+
+    try std.testing.expectEqual(@as(u32, 1), restored_handler_calls);
+}
