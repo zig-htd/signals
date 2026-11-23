@@ -260,8 +260,8 @@ test "wait returns raised signal" {
     defer deinit();
 
     const t = try std.Thread.spawn(.{}, struct {
-        fn raise() void {
-            posix.raise(.USR1) catch {};
+        fn raise() !void {
+            try posix.raise(.USR1);
         }
     }.raise, .{});
     t.join();
