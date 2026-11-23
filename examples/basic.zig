@@ -9,4 +9,5 @@ pub fn main() !void {
 
     const sig = try signals.wait();
     std.debug.print("Received: {s}\n", .{@tagName(sig)});
+    std.debug.print("Goodbye!\n", .{});
 }

@@ -17,6 +17,17 @@ var registered_signals: [max_signals]posix.SIG = undefined;
 var old_actions: [max_signals]posix.Sigaction = undefined;
 var registered: usize = 0;
 
+pub const Callback = struct {
+    context: *anyopaque,
+    call: CallbackFn,
+};
+pub const CallbackFn = *const fn (context: *anyopaque, sig: posix.SIG) void;
+
+var callback: Callback = undefined;
+var callback_io: std.Io = undefined;
+var callback_future: ?std.Io.Future(void) = null;
+var callback_stop: std.atomic.Value(bool) = .init(false);
+
 pub const InitError = error{
     AlreadyInitialized,
     InvalidSignal,
@@ -27,6 +38,8 @@ pub const WaitError = posix.PollError || posix.ReadError || error{
     NotInitialized,
     PipeClosed,
 };
+
+pub const CallbackInitError = InitError || std.Io.ConcurrentError;
 
 /// 初始化 self-pipe 并安装 `signals` 中每个信号的处理函数。
 ///
@@ -66,6 +79,46 @@ pub fn init(signals: []const posix.SIG) InitError!void {
     registered = count;
 }
 
+/// 初始化信号等待，并启动一个并发任务分发回调。
+///
+/// 回调只在由 `io.concurrent` 创建的普通任务上下文中执行，不在
+/// 异步信号 handler 中执行。回调应为串行执行，调用方负责保证上下文有效。
+pub fn initCallback(
+    io: std.Io,
+    signals: []const posix.SIG,
+    callback_context: *anyopaque,
+    callback_fn: CallbackFn,
+) CallbackInitError!void {
+    try init(signals);
+
+    callback = .{
+        .context = callback_context,
+        .call = callback_fn,
+    };
+    callback_stop.store(false, .release);
+
+    callback_io = io;
+    callback_future = io.concurrent(callbackLoop, .{&callback}) catch |err| {
+        callback_io = undefined;
+        callback = undefined;
+        deinit();
+        return err;
+    };
+}
+
+fn callbackLoop(context: *Callback) void {
+    while (true) {
+        // deinit 已开始，禁止进入下一次等待或回调派发。
+        if (callback_stop.load(.acquire)) return;
+
+        const sig = wait() catch return;
+
+        // wait 被唤醒时 deinit 可能已经开始；丢弃该通知，不再调用回调。
+        if (callback_stop.load(.acquire)) return;
+        context.call(context.context, sig);
+    }
+}
+
 /// 恢复旧的信号处理函数并关闭 self-pipe。
 ///
 /// 未初始化时是空操作，可以重复调用。
@@ -79,10 +132,20 @@ pub fn deinit() void {
     }
     registered = 0;
 
+    callback_stop.store(true, .release);
+
     rawClose(read_fd);
     rawClose(write_fd);
     read_fd = -1;
     write_fd = -1;
+
+    if (callback_future) |*future| {
+        _ = future.await(callback_io);
+        callback_future = null;
+    }
+
+    callback_io = undefined;
+    callback = undefined;
 }
 
 /// 阻塞等待，直到收到一个已注册的信号。
@@ -205,6 +268,45 @@ test "wait returns raised signal" {
 
     const sig = try waitTimeout(1000);
     try std.testing.expectEqual(posix.SIG.USR1, sig.?);
+}
+
+var callback_calls: u32 = 0;
+var callback_signal: posix.SIG = .USR1;
+
+fn testCallback(context: *anyopaque, sig: posix.SIG) void {
+    _ = context;
+    callback_calls += 1;
+    callback_signal = sig;
+}
+
+test "initCallback dispatches raised signal" {
+    callback_calls = 0;
+    callback_signal = .USR1;
+    var context: u8 = 0;
+
+    try initCallback(std.testing.io, &.{.USR1}, @ptrCast(&context), testCallback);
+
+    try posix.raise(.USR1);
+    try std.Io.sleep(std.testing.io, .fromMilliseconds(50), .awake);
+
+    try std.testing.expect(callback_calls >= 1);
+    try std.testing.expectEqual(posix.SIG.USR1, callback_signal);
+
+    deinit();
+}
+
+test "deinit stops callback task" {
+    callback_calls = 0;
+    var context: u8 = 0;
+
+    try initCallback(std.testing.io, &.{.USR1}, @ptrCast(&context), testCallback);
+    deinit();
+
+    try std.Io.sleep(std.testing.io, .fromMilliseconds(50), .awake);
+
+    try std.testing.expect(callback_stop.load(.acquire));
+    try std.testing.expect(callback_future == null);
+    try std.testing.expectEqual(@as(u32, 0), callback_calls);
 }
 
 var restored_handler_calls: u32 = 0;
